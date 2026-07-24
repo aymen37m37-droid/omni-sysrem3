@@ -65,8 +65,8 @@ router.post("/accounting/vouchers", (req, res) => {
   if (!requireAdmin(req, res)) return;
   const {
     type,
-    party_type,
-    party_id,
+    party_type = "general",
+    party_id = 0,
     party_name,
     amount,
     currency,
@@ -83,19 +83,35 @@ router.post("/accounting/vouchers", (req, res) => {
     safe_id,
   } = req.body;
 
-  let finalPartyName = party_name;
-  if (!finalPartyName && party_id) {
+  let finalPartyName = party_name || received_from;
+  const numericPartyId = Number(party_id) || 0;
+
+  if (!finalPartyName && numericPartyId > 0) {
     if (party_type === "employee") {
-      const emp = db.prepare("SELECT name FROM hr_employees WHERE id = ?").get(party_id) as any;
+      const emp = db.prepare("SELECT name FROM hr_employees WHERE id = ?").get(numericPartyId) as any;
       if (emp) finalPartyName = emp.name;
     } else if (party_type === "customer") {
-      const cust = db.prepare("SELECT name FROM customers WHERE id = ?").get(party_id) as any;
+      const cust = db.prepare("SELECT name FROM customers WHERE id = ?").get(numericPartyId) as any;
       if (cust) finalPartyName = cust.name;
+    } else if (party_type === "supplier") {
+      const supp = db.prepare("SELECT name FROM suppliers WHERE id = ?").get(numericPartyId) as any;
+      if (supp) finalPartyName = supp.name;
     }
   }
 
-  if (!type || !party_type || !party_id || !finalPartyName || amount === undefined) {
-    res.status(400).json({ error: "جميع الحقول الأساسية مطلوبة (النوع، الفئة، الطرف، المبلغ)" });
+  if (!finalPartyName && numericPartyId > 0) {
+    finalPartyName = `طرف #${numericPartyId}`;
+  }
+
+  const numericAmount = Number(amount);
+
+  if (!type || amount === undefined || amount === null || String(amount).trim() === "" || isNaN(numericAmount)) {
+    res.status(400).json({ error: "الرجاء تحديد نوع السند وإدخال مبلغ مالي صحيح" });
+    return;
+  }
+
+  if (!finalPartyName || !String(finalPartyName).trim()) {
+    res.status(400).json({ error: "يرجى اختيار الطرف المستهدف أو كتابة اسم المستلم / المدفوع له" });
     return;
   }
 
@@ -104,11 +120,14 @@ router.post("/accounting/vouchers", (req, res) => {
     const countRow = db.prepare("SELECT COUNT(*) as c FROM vouchers").get() as { c: number };
     const nextNum = String(countRow.c + 1);
 
-    let finalSafeId = safe_id;
+    let finalSafeId = safe_id ? Number(safe_id) : null;
     if (!finalSafeId) {
       const defaultSafe = db.prepare("SELECT id FROM safes WHERE name = 'الصندوق الرئيسي' LIMIT 1").get() as any;
       if (defaultSafe) finalSafeId = defaultSafe.id;
     }
+
+    // Fetch default document print settings if header fields are omitted
+    const docSettings = db.prepare("SELECT * FROM document_print_settings WHERE id = 1").get() as any;
 
     const r = db.prepare(`
       INSERT INTO vouchers (
@@ -120,21 +139,21 @@ router.post("/accounting/vouchers", (req, res) => {
     `).run(
       nextNum,
       type,
-      party_type,
-      party_id,
+      party_type || "general",
+      numericPartyId,
       finalPartyName,
-      amount,
+      numericAmount,
       currency ?? "دينار",
-      received_from ?? "",
+      received_from ?? finalPartyName ?? "",
       payment_against ?? "",
       payment_method ?? "cash",
       amount_text ?? "",
       notes ?? "",
-      header_title ?? "مخابز الشام للخبز العربي",
-      header_subtitle ?? "Maamil Al Sham",
-      logo_url ?? "/omnisystem-logo.png",
-      accent_color ?? "#ef4444",
-      bottom_text ?? "جودة الخبز ... سر ثقة عملائنا",
+      header_title ?? docSettings?.company_name ?? "مخابز الشام للخبز العربي",
+      header_subtitle ?? docSettings?.company_subtitle ?? "Maamil Al Sham",
+      logo_url ?? docSettings?.logo_url ?? "/omnisystem-logo.png",
+      accent_color ?? docSettings?.accent_color ?? "#ef4444",
+      bottom_text ?? docSettings?.voucher_footer_text ?? "جودة الخبز ... سر ثقة عملائنا",
       finalSafeId ?? null
     );
 
@@ -142,9 +161,9 @@ router.post("/accounting/vouchers", (req, res) => {
 
     if (finalSafeId) {
       if (type === "receipt") {
-        db.prepare("UPDATE safes SET balance = balance + ? WHERE id = ?").run(amount, finalSafeId);
+        db.prepare("UPDATE safes SET balance = balance + ? WHERE id = ?").run(numericAmount, finalSafeId);
       } else if (type === "payment") {
-        db.prepare("UPDATE safes SET balance = balance - ? WHERE id = ?").run(amount, finalSafeId);
+        db.prepare("UPDATE safes SET balance = balance - ? WHERE id = ?").run(numericAmount, finalSafeId);
       }
     }
 
